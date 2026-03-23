@@ -74,8 +74,8 @@ jobs:
             libcppunit-dev \
             xz-utils
 
-      - name: Generate README.html
-        run: rst2html.py README.rst README.html
+      # - name: Generate README.html
+      #   run: rst2html.py README.rst README.html
 
       - name: Build Linux binary
         run: |
@@ -122,8 +122,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-docutils zip
 
-      - name: Generate README.html
-        run: rst2html.py README.rst README.html
+      # - name: Generate README.html
+      #   run: rst2html.py README.rst README.html
 
       - name: Build Windows binary image
         run: |
@@ -164,10 +164,10 @@ jobs:
           python3 -m pip install --user docutils sphinx
           echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
 
-      - name: Generate README.html
-        run: |
-          export PATH="$(python3 -m site --user-base)/bin:$PATH"
-          rst2html.py README.rst README.html
+      # - name: Generate README.html
+      #   run: |
+      #     export PATH="$(python3 -m site --user-base)/bin:$PATH"
+      #     rst2html.py README.rst README.html
 
       - name: Build macOS release packages
         run: |
