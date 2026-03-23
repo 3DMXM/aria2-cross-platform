@@ -1,8 +1,10 @@
-name: build
+name: release
 
 on:
   push:
-  pull_request:
+    tags:
+      - "release-*"
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -13,112 +15,17 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) }}
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, macos-14]
-        compiler: [gcc, clang]
-        crypto: [openssl, gnutls]
-        bittorrent: [with-bt, without-bt]
-        exclude:
-          - os: macos-14
-            crypto: gnutls
-          - crypto: openssl
-            bittorrent: without-bt
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v6
-      - name: Linux setup
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install \
-            g++-12 \
-            clang-15 \
-            autoconf \
-            automake \
-            autotools-dev \
-            autopoint \
-            libtool \
-            pkg-config \
-            libssl-dev \
-            libgnutls28-dev \
-            libc-ares-dev \
-            zlib1g-dev \
-            libsqlite3-dev \
-            libssh2-1-dev \
-            libcppunit-dev
-      - name: MacOS setup
-        if: runner.os == 'macOS'
-        run: |
-          brew install cppunit gettext openssl libssh2 c-ares sqlite3 \
-            autoconf automake pkg-config libtool
-      - name: Setup clang (Linux)
-        if: runner.os == 'Linux' && matrix.compiler == 'clang'
-        run: |
-          echo 'CC=clang-15' >> $GITHUB_ENV
-          echo 'CXX=clang++-15' >> $GITHUB_ENV
-      - name: Setup clang (MacOS)
-        if: runner.os == 'macOS' && matrix.compiler == 'clang'
-        run: |
-          echo 'CC=clang' >> $GITHUB_ENV
-          echo 'CXX=clang++' >> $GITHUB_ENV
-      - name: Setup gcc (Linux)
-        if: runner.os == 'Linux' && matrix.compiler == 'gcc'
-        run: |
-          echo 'CC=gcc-12' >> $GITHUB_ENV
-          echo 'CXX=g++-12' >> $GITHUB_ENV
-      - name: Setup gcc (MacOS)
-        if: runner.os == 'macOS' && matrix.compiler == 'gcc'
-        run: |
-          echo 'CC=gcc' >> $GITHUB_ENV
-          echo 'CXX=g++' >> $GITHUB_ENV
-      - name: Libtool
-        run: |
-          autoreconf -i
-      - name: Setup compiler flags
-        run: |
-          asanflags="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
-
-          CPPFLAGS="$asanflags -g3"
-          LDFLAGS="$asanflags"
-
-          echo 'CPPFLAGS='"$CPPFLAGS" >> $GITHUB_ENV
-          echo 'LDFLAGS='"$LDFLAGS" >> $GITHUB_ENV
-      - name: Disable BitTorrent
-        if: matrix.bittorrent == 'without-bt'
-        run: |
-          FEATURE_FLAGS="$FEATURE_FLAGS --disable-bittorrent"
-
-          echo 'FEATURE_FLAGS='"$FEATURE_FLAGS" >> $GITHUB_ENV
-      - name: Configure autotools (Linux, gnutls)
-        if: runner.os == 'Linux' && matrix.crypto == 'gnutls'
-        run: |
-          ./configure --with-gnutls --without-openssl $FEATURE_FLAGS
-      - name: Configure autotools (Linux, openssl)
-        if: runner.os == 'Linux' && matrix.crypto == 'openssl'
-        run: |
-          ./configure --without-gnutls --with-openssl $FEATURE_FLAGS
-      - name: Configure autotools (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          ./configure \
-            --without-openssl --without-gnutls --with-appletls \
-            --disable-nls
-      - name: Build aria2
-        run: |
-          make -j"$(nproc 2> /dev/null || sysctl -n hw.ncpu)" check
-
   metadata:
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/release-') }}
     runs-on: ubuntu-22.04
     outputs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
       version: ${{ steps.meta.outputs.version }}
+      upstream_release_tag: ${{ steps.meta.outputs.upstream_release_tag }}
 
     steps:
       - name: Resolve release metadata
@@ -130,11 +37,13 @@ jobs:
           release_tag="$RELEASE_TAG"
           version="${release_tag#release-}"
           version="${version#v}"
+          upstream_release_tag="release-${version}"
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "upstream_release_tag=${upstream_release_tag}" >> "$GITHUB_OUTPUT"
 
-  build-linux-release:
+  build-linux:
     needs: metadata
     runs-on: ubuntu-22.04
 
@@ -198,7 +107,7 @@ jobs:
             aria2-${{ needs.metadata.outputs.version }}.tar.xz
           if-no-files-found: error
 
-  build-windows-release:
+  build-windows:
     needs: metadata
     runs-on: ubuntu-22.04
 
@@ -220,8 +129,8 @@ jobs:
         run: |
           docker build \
             --build-arg HOST=x86_64-w64-mingw32 \
-            --build-arg ARIA2_VERSION=${{ needs.metadata.outputs.release_tag }} \
-            --build-arg ARIA2_REF=refs/tags/${{ needs.metadata.outputs.release_tag }} \
+            --build-arg ARIA2_VERSION=${{ needs.metadata.outputs.upstream_release_tag }} \
+            --build-arg ARIA2_REF=refs/tags/${{ needs.metadata.outputs.upstream_release_tag }} \
             -t aria2-mingw-x86_64 - < Dockerfile.mingw
 
       - name: Package Windows binary
@@ -238,7 +147,7 @@ jobs:
           path: aria2-${{ needs.metadata.outputs.version }}-win-64bit-build1.zip
           if-no-files-found: error
 
-  build-macos-release:
+  build-macos:
     needs: metadata
     runs-on: macos-13
 
@@ -278,9 +187,9 @@ jobs:
   publish:
     needs:
       - metadata
-      - build-linux-release
-      - build-windows-release
-      - build-macos-release
+      - build-linux
+      - build-windows
+      - build-macos
     runs-on: ubuntu-22.04
 
     steps:
