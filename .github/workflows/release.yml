@@ -1,0 +1,205 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-22.04
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          release_tag="$RELEASE_TAG"
+          version="${release_tag#release-}"
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    needs: metadata
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.metadata.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            autotools-dev \
+            autopoint \
+            libtool \
+            pkg-config \
+            python3-docutils \
+            python3-sphinx \
+            libssl-dev \
+            libc-ares-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libssh2-1-dev \
+            libxml2-dev \
+            libcppunit-dev \
+            xz-utils
+
+      - name: Generate README.html
+        run: rst2html.py README.rst README.html
+
+      - name: Build Linux binary
+        run: |
+          autoreconf -i
+          ./configure \
+            --with-openssl \
+            --without-gnutls \
+            --disable-nls \
+            --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+          make -j"$(nproc)"
+
+      - name: Package Linux binary
+        run: |
+          mkdir -p linux-out
+          cp src/aria2c linux-out/
+          sh ./linux-release
+
+      - name: Build source archives
+        run: make dist-bzip2 dist-gzip dist-xz
+
+      - name: Upload Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-assets
+          path: |
+            aria2-${{ needs.metadata.outputs.version }}-linux-x86_64-build1.tar.xz
+            aria2-${{ needs.metadata.outputs.version }}.tar.bz2
+            aria2-${{ needs.metadata.outputs.version }}.tar.gz
+            aria2-${{ needs.metadata.outputs.version }}.tar.xz
+          if-no-files-found: error
+
+  build-windows:
+    needs: metadata
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.metadata.outputs.release_tag }}
+          fetch-depth: 1
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-docutils zip
+
+      - name: Generate README.html
+        run: rst2html.py README.rst README.html
+
+      - name: Build Windows binary image
+        run: |
+          docker build \
+            --build-arg HOST=x86_64-w64-mingw32 \
+            --build-arg ARIA2_VERSION=${{ needs.metadata.outputs.release_tag }} \
+            --build-arg ARIA2_REF=refs/tags/${{ needs.metadata.outputs.release_tag }} \
+            -t aria2-mingw-x86_64 - < Dockerfile.mingw
+
+      - name: Package Windows binary
+        run: |
+          mkdir -p mingw-out
+          docker run --rm -v "${PWD}/mingw-out:/out" aria2-mingw-x86_64 \
+            cp /aria2/src/aria2c.exe /out
+          HOST=x86_64-w64-mingw32 LABEL=win-64bit sh ./mingw-release
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: aria2-${{ needs.metadata.outputs.version }}-win-64bit-build1.zip
+          if-no-files-found: error
+
+  build-macos:
+    needs: metadata
+    runs-on: macos-13
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.metadata.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          brew install autoconf automake pkg-config libtool gettext gnu-tar
+          python3 -m pip install --user docutils sphinx
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      - name: Generate README.html
+        run: |
+          export PATH="$(python3 -m site --user-base)/bin:$PATH"
+          rst2html.py README.rst README.html
+
+      - name: Build macOS release packages
+        run: |
+          export PATH="$(python3 -m site --user-base)/bin:$PATH"
+          make -f makerelease-osx.mk
+
+      - name: Upload macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: |
+            aria2-${{ needs.metadata.outputs.version }}-osx-darwin.tar.bz2
+            aria2-${{ needs.metadata.outputs.version }}-osx-darwin.pkg
+            aria2-${{ needs.metadata.outputs.version }}-osx-darwin.dmg
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - metadata
+      - build-linux
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          name: aria2 ${{ needs.metadata.outputs.version }}
+          files: release-assets/*
+          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true

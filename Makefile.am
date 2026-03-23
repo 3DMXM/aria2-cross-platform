@@ -5,6 +5,7 @@ RST2HTML = @RST2HTML@
 
 EXTRA_DIST = config.rpath \
 	     script-helper \
+	     linux-release \
 	     makerelease \
 	     mingw-config mingw-release mingw-build-memo \
 	     android-config \
